@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ahmed's Plan Performance Tracker</title>
+  <link rel="stylesheet" href="style.css">
+  <!-- Chart.js for charts -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <!-- Supabase client -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body>
+  <div class="wrapper">
+    <!-- Header with title and date picker -->
+    <header class="site-header">
+      <h1>Ahmed's Plan Tracker</h1>
+      <div class="date-picker">
+        <select id="yearSelect"></select>
+        <select id="monthSelect">
+          <option value="1">January</option>
+          <option value="2">February</option>
+          <option value="3">March</option>
+          <option value="4">April</option>
+          <option value="5">May</option>
+          <option value="6">June</option>
+          <option value="7">July</option>
+          <option value="8">August</option>
+          <option value="9">September</option>
+          <option value="10">October</option>
+          <option value="11">November</option>
+          <option value="12">December</option>
+        </select>
+        <button id="loadBtn" class="btn-primary">Load</button>
+      </div>
+    </header>
+    <!-- Main content area -->
+    <main>
+      <!-- Stats Cards -->
+      <section class="stats-section">
+        <div class="stat-card good">
+          <h3>Good</h3>
+          <div class="stat-value" id="goodValue">0</div>
+          <div class="stat-controls">
+            <button onclick="updateValue('good',1)">+</button>
+            <button onclick="updateValue('good',-1)">-</button>
+          </div>
+        </div>
+        <div class="stat-card bad">
+          <h3>Bad</h3>
+          <div class="stat-value" id="badValue">0</div>
+          <div class="stat-controls">
+            <button onclick="updateValue('bad',1)">+</button>
+            <button onclick="updateValue('bad',-1)">-</button>
+          </div>
+        </div>
+        <div class="stat-card karma">
+          <h3>Karma Bad</h3>
+          <div class="stat-value" id="karmaValue">0</div>
+          <div class="stat-controls">
+            <button onclick="updateValue('karma_bad',1)">+</button>
+            <button onclick="updateValue('karma_bad',-1)">-</button>
+          </div>
+        </div>
+      </section>
+      <!-- Good Ratings by Channel -->
+      <section class="channel-inputs-card">
+        <h2>Good Ratings by Channel</h2>
+        <div class="inputs-grid">
+          <div class="input-field">
+            <label for="phoneGood">Phone</label>
+            <input type="number" id="phoneGood" min="0" value="0">
+          </div>
+          <div class="input-field">
+            <label for="chatGood">Chat</label>
+            <input type="number" id="chatGood" min="0" value="0">
+          </div>
+          <div class="input-field">
+            <label for="emailGood">Email</label>
+            <input type="number" id="emailGood" min="0" value="0">
+          </div>
+        </div>
+        <button class="btn-primary" onclick="updateGoodCounts()">Update</button>
+      </section>
+      <!-- Negative Tickets -->
+      <section class="negative-tickets-card">
+        <h2>Add Negative Ticket</h2>
+        <div class="ticket-form-grid">
+          <div class="input-field">
+            <label for="ticketLink">Ticket ID / Link</label>
+            <input type="text" id="ticketLink">
+          </div>
+          <div class="input-field">
+            <label for="ticketType">Type</label>
+            <select id="ticketType">
+              <option value="CSAT">CSAT</option>
+              <option value="Karma">Karma</option>
+            </select>
+          </div>
+          <div class="input-field">
+            <label for="ticketChannel">Channel</label>
+            <select id="ticketChannel">
+              <option value="Phone">Phone</option>
+              <option value="Chat">Chat</option>
+              <option value="Email">Email</option>
+            </select>
+          </div>
+          <div class="input-field">
+            <label for="ticketNote">Note (optional)</label>
+            <input type="text" id="ticketNote">
+          </div>
+        </div>
+        <button class="btn-primary" onclick="addTicket()">Add Ticket</button>
+        <div class="tickets-table-wrapper">
+          <table id="ticketsTable">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Ticket</th>
+                <th>Type</th>
+                <th>Channel</th>
+                <th>Note</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+            </tbody>
+          </table>
+        </div>
+      </section>
+      <!-- Metrics -->
+      <section id="metricsCard" class="metrics-card">
+        <!-- Dynamically inserted metrics -->
+      </section>
+      <!-- Distribution -->
+      <section id="distributionCard" class="distribution-card">
+        <!-- Dynamically inserted distribution info -->
+      </section>
+      <!-- Channel Analytics -->
+      <section class="channel-analytics-card">
+        <h2>Channel Analytics</h2>
+        <div id="channelAnalyticsContent" class="channel-analytics-content"></div>
+        <div class="chart-wrapper">
+          <canvas id="channelChart" height="280"></canvas>
+        </div>
+      </section>
+    </main>
+    <!-- Footer -->
+    <footer class="site-footer">
+      <p>Made by Ahmed Khaled's AI</p>
+    </footer>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>
