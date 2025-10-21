@@ -1,553 +1,607 @@
 // Initialise Supabase and global state
-// Import the createClient method from the global supabase object loaded via CDN
 const { createClient } = supabase;
 
-// Supabase credentials – using the user‑provided project URL and anon key
+// ⚠️ نفس الـ URL/KEY عندك
 const supabaseUrl = 'https://xwmndpgfhjafczipoktv.supabase.co';
 const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inh3bW5kcGdmaGphZmN6aXBva3R2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA1Mjc5MzUsImV4cCI6MjA3NjEwMzkzNX0.3MbwVrb2QrHkEuk5Vm_ziPdkKVc99Wk2vMQpdxLYQ6U';
 const supabaseClient = createClient(supabaseUrl, supabaseKey);
 
-// Global variables to hold the current performance row and tickets
 let currentPerformance = null;
 let currentTickets = [];
 let channelChart = null;
+let distChartGood = null;
+let distChartBad = null;
+let editingIndex = -1; // index of ticket being edited; -1 means adding new
 
-/**
- * Populate the year selector with a range of years around the current year.
- */
+/** Helpers */
+function todayYMD(){
+  const d = new Date(); const m = `${d.getMonth()+1}`.padStart(2,'0'); const day = `${d.getDate()}`.padStart(2,'0');
+  return `${d.getFullYear()}-${m}-${day}`;
+}
+async function logDailyChange(field_name, old_value, new_value){
+  if (!currentPerformance || old_value === new_value) return;
+  const change_amount = (new_value || 0) - (old_value || 0);
+  await supabaseClient.from('daily_changes').insert({
+    performance_id: currentPerformance.id,
+    change_date: todayYMD(),
+    field_name, old_value: old_value||0, new_value: new_value||0, change_amount
+  });
+}
+
+/** Populate year select */
 function populateYears() {
-  const yearSelect = document.getElementById('yearSelect');
+  const yearSel = document.getElementById('yearSelect');
   const currentYear = new Date().getFullYear();
   for (let y = currentYear - 5; y <= currentYear + 5; y++) {
     const opt = document.createElement('option');
-    opt.value = y;
-    opt.textContent = y;
+    opt.value = y; opt.textContent = y;
     if (y === currentYear) opt.selected = true;
-    yearSelect.appendChild(opt);
+    yearSel.appendChild(opt);
   }
 }
 
-/**
- * Load the performance data for the selected month and year from Supabase.
- * If no row exists yet, a new row is created with zero values.
- */
+/** Load or create performance row for selected year/month */
 async function loadMonth() {
   const year = parseInt(document.getElementById('yearSelect').value);
-  // Convert monthSelect value (1–12) to zero‑based index for storage
   const monthIndex = parseInt(document.getElementById('monthSelect').value) - 1;
-  // Fetch all rows for the chosen month/year
-  const { data: rows, error: fetchErr } = await supabaseClient
+
+  const { data: rows } = await supabaseClient
     .from('performance_data')
     .select('*')
     .eq('year', year)
     .eq('month', monthIndex);
+
   let row = null;
-  if (!fetchErr && Array.isArray(rows) && rows.length > 0) {
-    // Choose the row with the highest total (good + bad + karma_bad)
-    row = rows.reduce((best, curr) => {
-      const bestTotal = (best.good || 0) + (best.bad || 0) + (best.karma_bad || 0);
-      const currTotal = (curr.good || 0) + (curr.bad || 0) + (curr.karma_bad || 0);
-      return currTotal > bestTotal ? curr : best;
+  if (rows && rows.length > 0) {
+    row = rows.reduce((best, cur) => {
+      const bestTotal = (best.good||0)+(best.bad||0)+(best.karma_bad||0);
+      const curTotal  = (cur.good||0)+(cur.bad||0)+(cur.karma_bad||0);
+      return curTotal > bestTotal ? cur : best;
     }, rows[0]);
   }
   if (!row) {
-    // No existing row – create a new entry
-    const { data: inserted, error: insertErr } = await supabaseClient
+    const { data: inserted } = await supabaseClient
       .from('performance_data')
       .insert({
-        year: year,
-        month: monthIndex,
-        good: 0,
-        bad: 0,
-        karma_bad: 0,
-        good_phone: 0,
-        good_chat: 0,
-        good_email: 0
+        year, month: monthIndex,
+        good: 0, bad: 0, karma_bad: 0,
+        good_phone: 0, good_chat: 0, good_email: 0,
+        genesys_good: 0, genesys_bad: 0  // موجودة في الداتا بيز حسب خطتك
       })
-      .select()
-      .single();
-    if (insertErr) {
-      console.error('Error creating performance row', insertErr);
-      return;
-    }
+      .select().single();
     row = inserted;
   }
   currentPerformance = row;
-  // Load associated tickets
+  editingIndex = -1;
+  resetTicketForm();
   await loadTickets();
   updateUI();
+  await refreshDailyLog();
 }
 
-/**
- * Load all tickets linked to the current performance row.
- */
+/** Load tickets for current performance row */
 async function loadTickets() {
-  if (!currentPerformance) {
-    currentTickets = [];
-    return;
-  }
-  const { data: tickets, error } = await supabaseClient
+  if (!currentPerformance) { currentTickets = []; return; }
+  const { data: tickets } = await supabaseClient
     .from('tickets')
     .select('*')
     .eq('performance_id', currentPerformance.id)
     .order('created_at', { ascending: true });
-  if (error) {
-    console.error('Error loading tickets', error);
-    currentTickets = [];
-  } else {
-    currentTickets = tickets || [];
-  }
+  currentTickets = tickets || [];
 }
 
-/**
- * Increment or decrement a numeric field (good, bad, karma_bad) on the current row.
- * The value never goes below zero.
- */
+/** Update numeric field with delta (and log) */
 async function updateValue(field, delta) {
   if (!currentPerformance) return;
   let newVal = (currentPerformance[field] || 0) + delta;
   if (newVal < 0) newVal = 0;
+  const old = currentPerformance[field] || 0;
   const { data, error } = await supabaseClient
     .from('performance_data')
     .update({ [field]: newVal })
     .eq('id', currentPerformance.id)
-    .select()
-    .single();
-  if (error) {
-    console.error('Error updating', field, error);
-    return;
+    .select().single();
+  if (!error) {
+    currentPerformance = data;
+    await logDailyChange(field, old, newVal); // سجل التغيير
+    updateUI();
+    await refreshDailyLog();
   }
-  currentPerformance = data;
-  updateUI();
 }
 
-/**
- * Update good counts by channel (phone, chat, email).
- */
+/** Update good counts by channel */
 async function updateGoodCounts() {
   if (!currentPerformance) return;
   const phone = parseInt(document.getElementById('phoneGood').value) || 0;
-  const chat = parseInt(document.getElementById('chatGood').value) || 0;
+  const chat  = parseInt(document.getElementById('chatGood').value)  || 0;
   const email = parseInt(document.getElementById('emailGood').value) || 0;
-  const { data, error } = await supabaseClient
+  const { data } = await supabaseClient
     .from('performance_data')
     .update({ good_phone: phone, good_chat: chat, good_email: email })
     .eq('id', currentPerformance.id)
-    .select()
-    .single();
-  if (error) {
-    console.error('Error updating good counts', error);
-    return;
-  }
+    .select().single();
   currentPerformance = data;
   updateUI();
 }
 
-/**
- * Add a new negative ticket to Supabase and adjust counts accordingly.
- */
-async function addTicket() {
+/** Update Genesys counts (and log) */
+async function updateGenesysCounts(){
   if (!currentPerformance) return;
-  const ticketId = document.getElementById('ticketLink').value.trim();
-  const type = document.getElementById('ticketType').value;
-  const channel = document.getElementById('ticketChannel').value;
-  const note = document.getElementById('ticketNote').value.trim();
-  if (!ticketId) {
-    alert('Please enter a ticket ID or link.');
-    return;
-  }
-  const { data: newTicket, error } = await supabaseClient
+  const gGood = parseInt(document.getElementById('genesysGood').value)||0;
+  const gBad  = parseInt(document.getElementById('genesysBad').value)||0;
+  const oldGood = currentPerformance.genesys_good||0;
+  const oldBad  = currentPerformance.genesys_bad||0;
+
+  const { data } = await supabaseClient
+    .from('performance_data')
+    .update({ genesys_good: gGood, genesys_bad: gBad })
+    .eq('id', currentPerformance.id)
+    .select().single();
+
+  currentPerformance = data;
+  await logDailyChange('genesys_good', oldGood, gGood);
+  await logDailyChange('genesys_bad',  oldBad,  gBad);
+  updateUI();
+  await refreshDailyLog();
+}
+
+/** Add new ticket (DSAT/Karma) and adjust counts (+ log) */
+async function addNewTicket(ticketId, type, channel, note) {
+  const { data: newTicket, error: insErr } = await supabaseClient
     .from('tickets')
     .insert({
       performance_id: currentPerformance.id,
-      ticket_id: ticketId,
-      type: type,
-      channel: channel,
-      note: note || null
+      ticket_id: ticketId, type, channel, note: note || null
     })
-    .select()
-    .single();
-  if (error) {
-    console.error('Error inserting ticket', error);
-    return;
-  }
-  // Adjust counts on the performance row depending on ticket type
-  const updateFields = {};
-  if (type === 'CSAT') {
-    updateFields.bad = (currentPerformance.bad || 0) + 1;
-  } else {
-    updateFields.karma_bad = (currentPerformance.karma_bad || 0) + 1;
-  }
-  const { data: updatedRow, error: updateErr } = await supabaseClient
+    .select().single();
+  if (insErr) { console.error('Error inserting ticket', insErr); return; }
+
+  // Adjust counts based on type
+  const field = type === 'DSAT' ? 'bad' : 'karma_bad';
+  const old = currentPerformance[field] || 0;
+  const newCount = old + 1;
+  const { data: updatedRow } = await supabaseClient
     .from('performance_data')
-    .update(updateFields)
+    .update({ [field]: newCount })
     .eq('id', currentPerformance.id)
-    .select()
-    .single();
-  if (!updateErr) {
-    currentPerformance = updatedRow;
+    .select().single();
+  currentPerformance = updatedRow;
+  await logDailyChange(field, old, newCount);
+}
+
+/** Edit existing ticket and adjust counts if type changes (+ log) */
+async function updateExistingTicket(index, ticketId, type, channel, note) {
+  const original = currentTickets[index];
+  if (!original) return;
+
+  // If type changed, update counts
+  if (original.type !== type) {
+    const decField = original.type === 'DSAT' ? 'bad' : 'karma_bad';
+    const incField = type === 'DSAT' ? 'bad' : 'karma_bad';
+    const oldDec = currentPerformance[decField] || 0;
+    const oldInc = currentPerformance[incField] || 0;
+    const decVal = Math.max(0, oldDec - 1);
+    const incVal = oldInc + 1;
+    const { data: updRow } = await supabaseClient
+      .from('performance_data')
+      .update({ [decField]: decVal, [incField]: incVal })
+      .eq('id', currentPerformance.id)
+      .select().single();
+    currentPerformance = updRow;
+    await logDailyChange(decField, oldDec, decVal);
+    await logDailyChange(incField, oldInc, incVal);
   }
-  // Clear input fields
+
+  await supabaseClient
+    .from('tickets')
+    .update({ ticket_id: ticketId, type, channel, note: note || null })
+    .eq('id', original.id)
+    .select().single();
+}
+
+/** Submit ticket form: add new or update existing */
+async function submitTicket() {
+  if (!currentPerformance) return;
+  const ticketId = document.getElementById('ticketLink').value.trim();
+  const type     = document.getElementById('ticketType').value; // DSAT|Karma
+  const channel  = document.getElementById('ticketChannel').value;
+  const note     = document.getElementById('ticketNote').value.trim();
+  if (!ticketId) { alert('Please enter a ticket ID or link.'); return; }
+
+  if (editingIndex === -1) {
+    await addNewTicket(ticketId, type, channel, note);
+  } else {
+    await updateExistingTicket(editingIndex, ticketId, type, channel, note);
+  }
+  resetTicketForm();
+  editingIndex = -1;
+  await loadTickets();
+  updateUI();
+}
+
+/** Reset ticket form and button states */
+function resetTicketForm() {
   document.getElementById('ticketLink').value = '';
   document.getElementById('ticketNote').value = '';
-  await loadTickets();
-  updateUI();
+  document.getElementById('ticketType').value = 'DSAT';
+  document.getElementById('ticketChannel').value = 'Phone';
+  document.getElementById('addTicketBtn').textContent = 'Add Ticket';
+  document.getElementById('cancelEditBtn').style.display = 'none';
 }
 
-/**
- * Remove a ticket at the given index and update counts accordingly.
- */
+/** Cancel editing mode */
+function cancelEdit() { editingIndex = -1; resetTicketForm(); }
+
+/** Populate form for editing a ticket */
+function editTicket(index) {
+  const t = currentTickets[index]; if (!t) return;
+  editingIndex = index;
+  document.getElementById('ticketLink').value = t.ticket_id;
+  document.getElementById('ticketNote').value = t.note || '';
+  document.getElementById('ticketType').value = t.type; // DSAT|Karma
+  document.getElementById('ticketChannel').value = t.channel;
+  document.getElementById('addTicketBtn').textContent = 'Save Ticket';
+  document.getElementById('cancelEditBtn').style.display = 'inline-block';
+}
+
+/** Delete ticket at index and adjust counts (+ log) */
 async function removeTicket(index) {
-  if (!currentPerformance) return;
-  const ticket = currentTickets[index];
-  if (!ticket) return;
-  const { error } = await supabaseClient
-    .from('tickets')
-    .delete()
-    .eq('id', ticket.id);
-  if (error) {
-    console.error('Error deleting ticket', error);
-    return;
-  }
-  // Adjust counts
-  const updateFields = {};
-  if (ticket.type === 'CSAT') {
-    updateFields.bad = Math.max(0, (currentPerformance.bad || 0) - 1);
-  } else {
-    updateFields.karma_bad = Math.max(0, (currentPerformance.karma_bad || 0) - 1);
-  }
-  const { data: updatedRow, error: updateErr } = await supabaseClient
+  const t = currentTickets[index]; if (!t) return;
+  const { error } = await supabaseClient.from('tickets').delete().eq('id', t.id);
+  if (error) { console.error('Error deleting ticket', error); return; }
+
+  const field = t.type === 'DSAT' ? 'bad' : 'karma_bad';
+  const old = currentPerformance[field] || 0;
+  const newVal = Math.max(0, old - 1);
+  const { data: updatedRow } = await supabaseClient
     .from('performance_data')
-    .update(updateFields)
+    .update({ [field]: newVal })
     .eq('id', currentPerformance.id)
-    .select()
-    .single();
-  if (!updateErr) {
-    currentPerformance = updatedRow;
-  }
+    .select().single();
+  currentPerformance = updatedRow;
+  await logDailyChange(field, old, newVal);
+
   await loadTickets();
+  editingIndex = -1;
+  resetTicketForm();
   updateUI();
 }
 
-/**
- * Compute CSAT and Karma metrics, plus the number of additional good ratings needed
- * to reach threshold targets (88%, 90%, 95%).
- */
+/** Compute metrics with Genesys */
 function computeMetrics() {
   if (!currentPerformance) {
-    return {
-      csat: 0,
-      karma: 0,
-      needCsat: { 88: 0, 90: 0, 95: 0 },
-      needKarma: { 88: 0, 90: 0, 95: 0 }
-    };
+    return { csat: 0, karma: 0, needCsat: {88:0,90:0,95:0}, needKarma: {88:0,90:0,95:0} };
   }
-  const g = currentPerformance.good || 0;
-  const b = currentPerformance.bad || 0;
-  const k = currentPerformance.karma_bad || 0;
-  // CSAT is good / (good + bad)
+  const g0 = currentPerformance.good || 0;
+  const b0 = currentPerformance.bad || 0;
+  const k  = currentPerformance.karma_bad || 0;
+  const gg = currentPerformance.genesys_good || 0;
+  const gb = currentPerformance.genesys_bad  || 0;
+
+  const g = g0 + gg;
+  const b = b0 + gb;
+
   const denomCsat = g + b;
   const csat = denomCsat > 0 ? (g / denomCsat) * 100 : 0;
-  // Karma is good / (good + bad + karma_bad)
+
   const denomKarma = g + b + k;
   const karmaP = denomKarma > 0 ? (g / denomKarma) * 100 : 0;
-  // Helper to calculate how many good ratings needed to reach a threshold
-  function calcNeeded(threshold, includeKarma) {
-    const t = threshold;
-    let numerator;
-    if (includeKarma) {
-      numerator = t * g + t * b + t * k - g;
-    } else {
-      numerator = t * g + t * b - g;
-    }
-    const denom = 1 - t;
-    let needed = 0;
-    if (denom > 0) {
-      needed = Math.ceil(numerator / denom);
-    }
-    return needed > 0 ? needed : 0;
+
+  function calcNeeded(th, includeKarma) {
+    const t = th;
+    // Solve for additional good x such that: (g+x)/(g+x + b + (includeKarma?k:0)) >= t
+    const extraDen = includeKarma ? (b + k) : b;
+    const x = Math.ceil((t*(g+extraDen) - g) / (1 - t));
+    return x > 0 ? x : 0;
   }
   const targets = [0.88, 0.90, 0.95];
-  const needCsat = {};
-  const needKarma = {};
+  const needCsat = {}, needKarma = {};
   targets.forEach((thr) => {
-    const per = Math.round(thr * 100);
-    needCsat[per] = calcNeeded(thr, false);
+    const per = Math.round(thr*100);
+    needCsat[per]  = calcNeeded(thr, false);
     needKarma[per] = calcNeeded(thr, true);
   });
-  return { csat: csat, karma: karmaP, needCsat: needCsat, needKarma: needKarma };
+
+  return { csat, karma: karmaP, needCsat, needKarma, totals: {g,b,k,gg,gb,g0:b0} };
 }
 
-/**
- * Render the distribution of good and bad ratings by channel into the distribution card.
- */
+/** Update metrics card content */
+function updateMetrics() {
+  const card = document.getElementById('metricsCard');
+  if (!currentPerformance) { card.innerHTML = ''; return; }
+  const metrics = computeMetrics();
+  let html = '<h2>Performance Metrics</h2>';
+  html += `<p><strong>CSAT:</strong> ${metrics.csat.toFixed(1)}% &nbsp; <strong>Karma:</strong> ${metrics.karma.toFixed(1)}%</p>`;
+  html += '<p style="margin-top:0.5rem;"><strong>Good ratings needed to reach targets:</strong></p>';
+  for (const per in metrics.needCsat) {
+    html += `<p>${per}% CSAT: ${metrics.needCsat[per]} &nbsp; | &nbsp; ${per}% Karma: ${metrics.needKarma[per]}</p>`;
+  }
+  html += `<div class="progress-bar"><span class="csat" style="width:${metrics.csat}%"></span></div>`;
+  html += `<div class="progress-bar"><span class="karma" style="width:${metrics.karma}%"></span></div>`;
+  card.innerHTML = html;
+}
+
+/** Weekly progress (simple cumulative snapshot) */
+function updateWeeklyProgress(){
+  const container = document.getElementById('weeklyProgress');
+  container.innerHTML = '';
+  if (!currentPerformance) return;
+
+  const targets = {1:80, 2:84, 3:86, 4:88};
+  const metrics = computeMetrics();
+  const csat = Number(metrics.csat.toFixed(1));
+  const karma = Number(metrics.karma.toFixed(1));
+
+  for (let i=1;i<=4;i++){
+    const met = csat >= targets[i];
+    const card = document.createElement('div');
+    card.className = `week-card ${met?'good':'bad'}`;
+    card.innerHTML = `
+      <div class="row">
+        <strong>Week ${i}</strong>
+      </div>
+      <div class="row">CSAT: <strong>${csat}%</strong> &nbsp; Karma: <strong>${karma}%</strong></div>
+      <div class="status">${met ? '✓ Met' : '✗ Below' } target (${targets[i]}%)</div>
+    `;
+    container.appendChild(card);
+  }
+}
+
+/** Daily Change Log UI */
+function prettyFieldLabel(field){
+  if (field === 'bad') return 'DSAT';
+  if (field === 'karma_bad') return 'Karma Bad';
+  if (field === 'genesys_bad') return 'Genesys DSAT';
+  if (field === 'genesys_good') return 'Genesys Good';
+  return 'Good';
+}
+async function refreshDailyLog(){
+  const list = document.getElementById('dailyLogList');
+  if (!currentPerformance){ list.innerHTML = ''; return; }
+  const from = document.getElementById('logFrom').value || null;
+  const to   = document.getElementById('logTo').value   || null;
+  let query = supabaseClient
+    .from('daily_changes')
+    .select('*')
+    .eq('performance_id', currentPerformance.id);
+  if (from) query = query.gte('change_date', from);
+  if (to)   query = query.lte('change_date', to);
+  const { data: changes } = await query.order('change_date', { ascending:false }).order('created_at', { ascending:false });
+
+  // group by date
+  const groups = {};
+  (changes||[]).forEach(c => {
+    (groups[c.change_date] ||= []).push(c);
+  });
+
+  list.innerHTML = '';
+  Object.keys(groups).sort((a,b)=> a < b ? 1 : -1).forEach(date=>{
+    const box = document.createElement('div');
+    box.className = 'entry';
+    const title = document.createElement('div');
+    title.className = 'date';
+    const nice = new Date(date+'T00:00:00').toLocaleDateString(undefined, { month:'long', day:'numeric' });
+    title.textContent = nice;
+    box.appendChild(title);
+
+    const row = document.createElement('div');
+    groups[date].forEach((c, idx)=>{
+      const span = document.createElement('span');
+      const sign = c.change_amount >= 0 ? '+' : '';
+      const badge = document.createElement('span');
+      badge.className = 'badge ' + (
+        c.field_name.includes('karma') ? 'karma' :
+        (c.field_name.includes('bad') ? 'bad' : 'good')
+      );
+      badge.textContent = `${sign}${c.change_amount} ${prettyFieldLabel(c.field_name)}`;
+      if (idx>0) row.appendChild(document.createTextNode(' '));
+      row.appendChild(badge);
+    });
+    box.appendChild(row);
+    list.appendChild(box);
+  });
+}
+
+/** Update distribution charts (Good / DSAT only) */
 function updateDistribution() {
   const distDiv = document.getElementById('distributionCard');
   if (!currentPerformance) {
-    distDiv.innerHTML = '';
+    if (distChartGood) { distChartGood.destroy(); distChartGood = null; }
+    if (distChartBad) { distChartBad.destroy(); distChartBad = null; }
     return;
   }
-  // Good counts for each channel
-  const pg = currentPerformance.good_phone || 0;
-  const cg = currentPerformance.good_chat || 0;
+
+  const pg = (currentPerformance.good_phone || 0) + (currentPerformance.genesys_good || 0);
+  const cg = currentPerformance.good_chat  || 0;
   const eg = currentPerformance.good_email || 0;
-  const totalG = pg + cg + eg;
-  const goodPercent = {
-    Phone: totalG > 0 ? ((pg / totalG) * 100).toFixed(1) : '0',
-    Chat: totalG > 0 ? ((cg / totalG) * 100).toFixed(1) : '0',
-    Email: totalG > 0 ? ((eg / totalG) * 100).toFixed(1) : '0'
-  };
-  // Bad counts for each channel from tickets
-  const badCounts = { Phone: 0, Chat: 0, Email: 0 };
+  const goodData = [pg, cg, eg];
+
+  // DSAT per channel (tickets DSAT only) + Genesys DSAT for Phone
+  const dsatCounts = { Phone: 0, Chat: 0, Email: 0 };
   currentTickets.forEach((t) => {
-    badCounts[t.channel] = (badCounts[t.channel] || 0) + 1;
+    if (t.type === 'DSAT') dsatCounts[t.channel] = (dsatCounts[t.channel] || 0) + 1;
   });
-  const totalBad = badCounts.Phone + badCounts.Chat + badCounts.Email;
-  const badPercent = {
-    Phone: totalBad > 0 ? ((badCounts.Phone / totalBad) * 100).toFixed(1) : '0',
-    Chat: totalBad > 0 ? ((badCounts.Chat / totalBad) * 100).toFixed(1) : '0',
-    Email: totalBad > 0 ? ((badCounts.Email / totalBad) * 100).toFixed(1) : '0'
-  };
-  let html = '<h2>Channel Distribution</h2>';
-  html += '<p><strong>Good:</strong> Phone ' + goodPercent.Phone + '%, Chat ' + goodPercent.Chat + '%, Email ' + goodPercent.Email + '%</p>';
-  html += '<p><strong>Bad:</strong> Phone ' + badPercent.Phone + '%, Chat ' + badPercent.Chat + '%, Email ' + badPercent.Email + '%</p>';
-  distDiv.innerHTML = html;
+  dsatCounts.Phone += (currentPerformance.genesys_bad || 0);
+  const badData = [dsatCounts.Phone||0, dsatCounts.Chat||0, dsatCounts.Email||0];
+
+  const goodColors = ['rgba(16,185,129,0.7)','rgba(16,185,129,0.5)','rgba(16,185,129,0.3)'];
+  const badColors  = ['rgba(239,68,68,0.7)','rgba(239,68,68,0.5)','rgba(239,68,68,0.3)'];
+
+  const ctxGood = document.getElementById('distGoodChart').getContext('2d');
+  if (distChartGood) distChartGood.destroy();
+  distChartGood = new Chart(ctxGood, {
+    type:'doughnut',
+    data:{ labels:['Phone','Chat','Email'], datasets:[{ label:'Good Ratings', data:goodData, backgroundColor:goodColors, hoverOffset:4 }] },
+    options:{ plugins:{ legend:{ position:'bottom' } } }
+  });
+
+  const ctxBad = document.getElementById('distBadChart').getContext('2d');
+  if (distChartBad) distChartBad.destroy();
+  distChartBad = new Chart(ctxBad, {
+    type:'doughnut',
+    data:{ labels:['Phone','Chat','Email'], datasets:[{ label:'DSAT', data:badData, backgroundColor:badColors, hoverOffset:4 }] },
+    options:{ plugins:{ legend:{ position:'bottom' } } }
+  });
 }
 
-/**
- * Render per‑channel analytics including counts, CSAT/Karma rates and a progress bar.
- * Also draw a bar chart comparing counts across channels.
- */
+/** Update channel analytics and bar chart (Good, DSAT, Karma) */
 function updateChannelAnalytics() {
   const container = document.getElementById('channelAnalyticsContent');
   if (!currentPerformance) {
     container.innerHTML = '';
-    if (channelChart) {
-      channelChart.destroy();
-      channelChart = null;
-    }
+    if (channelChart) { channelChart.destroy(); channelChart = null; }
     return;
   }
-  // Good counts per channel
   const goodCounts = {
-    Phone: currentPerformance.good_phone || 0,
+    Phone: (currentPerformance.good_phone || 0) + (currentPerformance.genesys_good || 0),
     Chat: currentPerformance.good_chat || 0,
     Email: currentPerformance.good_email || 0
   };
-  // Separate CSAT bad and Karma bad counts per channel
-  const csatBadCounts = { Phone: 0, Chat: 0, Email: 0 };
-  const karmaBadCounts = { Phone: 0, Chat: 0, Email: 0 };
+  const dsatCounts = { Phone: 0, Chat: 0, Email: 0 };
+  const karmaCounts = { Phone: 0, Chat: 0, Email: 0 };
   currentTickets.forEach((t) => {
-    if (t.type === 'CSAT') {
-      csatBadCounts[t.channel] = (csatBadCounts[t.channel] || 0) + 1;
-    } else {
-      karmaBadCounts[t.channel] = (karmaBadCounts[t.channel] || 0) + 1;
-    }
+    if (t.type === 'DSAT') dsatCounts[t.channel] = (dsatCounts[t.channel] || 0) + 1;
+    else                   karmaCounts[t.channel] = (karmaCounts[t.channel] || 0) + 1;
   });
-  const channels = ['Phone', 'Chat', 'Email'];
+  dsatCounts.Phone += (currentPerformance.genesys_bad || 0);
+
+  const channels = ['Phone','Chat','Email'];
   container.innerHTML = '';
   channels.forEach((ch) => {
     const g = goodCounts[ch] || 0;
-    const csatB = csatBadCounts[ch] || 0;
-    const karmaB = karmaBadCounts[ch] || 0;
-    const total = g + csatB + karmaB;
-    const goodP = total > 0 ? (g / total) * 100 : 0;
-    const csatP = total > 0 ? (csatB / total) * 100 : 0;
-    const karmaP = total > 0 ? (karmaB / total) * 100 : 0;
-    // Card element using the new classes defined in style.css
+    const d = dsatCounts[ch] || 0;
+    const k = karmaCounts[ch] || 0;
+    const total = g + d + k;
+    const goodP = total>0 ? (g/total)*100 : 0;
+    const dsatP = total>0 ? (d/total)*100 : 0;
+    const karmaP = total>0 ? (k/total)*100 : 0;
+
     const card = document.createElement('div');
     card.className = 'channel-box';
-    const title = document.createElement('h3');
-    title.textContent = ch;
-    const pGood = document.createElement('p');
-    pGood.innerHTML = '<strong>Good:</strong> ' + g;
-    const pCsat = document.createElement('p');
-    pCsat.innerHTML = '<strong>CSAT Bad:</strong> ' + csatB;
-    const pKarma = document.createElement('p');
-    pKarma.innerHTML = '<strong>Karma Bad:</strong> ' + karmaB;
-    // Compute CSAT and Karma rates per channel
-    const csatRate = g + csatB > 0 ? ((g / (g + csatB)) * 100).toFixed(1) : '0';
-    const karmaRate = g + csatB + karmaB > 0 ? ((g / (g + csatB + karmaB)) * 100).toFixed(1) : '0';
-    const pRates = document.createElement('p');
-    pRates.innerHTML = '<strong>CSAT:</strong> ' + csatRate + '% &nbsp; <strong>Karma:</strong> ' + karmaRate + '%';
-    // Create progress bar container
-    const bar = document.createElement('div');
-    bar.className = 'progress';
-    const segGood = document.createElement('span');
-    segGood.className = 'good';
-    segGood.style.width = goodP + '%';
-    const segCsat = document.createElement('span');
-    segCsat.className = 'csat';
-    segCsat.style.width = csatP + '%';
-    const segKarma = document.createElement('span');
-    segKarma.className = 'karma';
-    segKarma.style.width = karmaP + '%';
-    bar.appendChild(segGood);
-    bar.appendChild(segCsat);
-    bar.appendChild(segKarma);
-    // Assemble card
-    card.appendChild(title);
-    card.appendChild(pGood);
-    card.appendChild(pCsat);
-    card.appendChild(pKarma);
-    card.appendChild(pRates);
-    card.appendChild(bar);
+    card.innerHTML = `
+      <h3>${ch}</h3>
+      <p><strong>Good:</strong> ${g}</p>
+      <p><strong>DSAT Bad:</strong> ${d}</p>
+      <p><strong>Karma Bad:</strong> ${k}</p>
+      <p><strong>CSAT:</strong> ${(g + d > 0 ? (g/(g+d)*100).toFixed(1) : '0')}% &nbsp;
+         <strong>Karma:</strong> ${(total > 0 ? (g/total*100).toFixed(1) : '0')}%</p>
+      <div class="progress">
+        <span class="good" style="width:${goodP}%"></span>
+        <span class="csat" style="width:${dsatP}%"></span>
+        <span class="karma" style="width:${karmaP}%"></span>
+      </div>
+    `;
     container.appendChild(card);
   });
-  // Chart dataset for overall comparison across channels
-  const data = {
+
+  // Bar chart for counts
+  const barData = {
     labels: channels,
     datasets: [
-      {
-        label: 'Good',
-        data: [goodCounts.Phone, goodCounts.Chat, goodCounts.Email],
-        backgroundColor: 'rgba(16, 185, 129, 0.7)',
-        borderColor: 'rgba(16, 185, 129, 1)',
-        borderWidth: 1
-      },
-      {
-        label: 'CSAT Bad',
-        data: [csatBadCounts.Phone, csatBadCounts.Chat, csatBadCounts.Email],
-        backgroundColor: 'rgba(239, 68, 68, 0.7)',
-        borderColor: 'rgba(239, 68, 68, 1)',
-        borderWidth: 1
-      },
-      {
-        label: 'Karma Bad',
-        data: [karmaBadCounts.Phone, karmaBadCounts.Chat, karmaBadCounts.Email],
-        backgroundColor: 'rgba(168, 85, 247, 0.7)',
-        borderColor: 'rgba(168, 85, 247, 1)',
-        borderWidth: 1
-      }
+      { label:'Good', data:[goodCounts.Phone, goodCounts.Chat, goodCounts.Email],
+        backgroundColor:'rgba(16,185,129,0.7)', borderColor:'rgba(16,185,129,1)', borderWidth:1 },
+      { label:'DSAT Bad', data:[dsatCounts.Phone, dsatCounts.Chat, dsatCounts.Email],
+        backgroundColor:'rgba(239,68,68,0.7)', borderColor:'rgba(239,68,68,1)', borderWidth:1 },
+      { label:'Karma Bad', data:[karmaCounts.Phone, karmaCounts.Chat, karmaCounts.Email],
+        backgroundColor:'rgba(168,85,247,0.7)', borderColor:'rgba(168,85,247,1)', borderWidth:1 }
     ]
   };
   const ctx = document.getElementById('channelChart').getContext('2d');
-  if (channelChart) {
-    channelChart.destroy();
-  }
+  if (channelChart) channelChart.destroy();
   channelChart = new Chart(ctx, {
-    type: 'bar',
-    data: data,
-    options: {
-      responsive: true,
-      scales: {
-        y: {
-          beginAtZero: true,
-          title: { display: true, text: 'Count' }
-        }
-      }
+    type:'bar',
+    data: barData,
+    options:{
+      responsive:true,
+      scales:{ y:{ beginAtZero:true, title:{ display:true, text:'Count' } } },
+      plugins:{ legend:{ position:'bottom' } }
     }
   });
 }
 
-/**
- * Render overall performance metrics into the metrics card.
- */
-function updateMetrics() {
-  const card = document.getElementById('metricsCard');
-  if (!currentPerformance) {
-    card.innerHTML = '';
-    return;
-  }
-  const metrics = computeMetrics();
-  let html = '<h2>Performance Metrics</h2>';
-  html += '<p><strong>CSAT:</strong> ' + metrics.csat.toFixed(1) + '% &nbsp; <strong>Karma:</strong> ' + metrics.karma.toFixed(1) + '%</p>';
-  html += '<p style="margin-top:0.5rem;"><strong>Good ratings needed to reach targets:</strong></p>';
-  for (const per in metrics.needCsat) {
-    html += '<p>' + per + '% CSAT: ' + metrics.needCsat[per] + ' &nbsp; | &nbsp; ' + per + '% Karma: ' + metrics.needKarma[per] + '</p>';
-  }
-  card.innerHTML = html;
-}
-
-/**
- * Render the tickets table with current tickets and remove buttons.
- */
+/** Tickets table */
 function updateTicketsTable() {
   const tbody = document.getElementById('ticketsTable').querySelector('tbody');
   tbody.innerHTML = '';
   currentTickets.forEach((t, idx) => {
     const tr = document.createElement('tr');
-    const tdIndex = document.createElement('td');
-    tdIndex.textContent = idx + 1;
+    const tdIndex = document.createElement('td'); tdIndex.textContent = idx + 1;
     const tdLink = document.createElement('td');
-    // If the ticket looks like a URL, render as a link
     if (/^https?:\/\//i.test(t.ticket_id)) {
-      const a = document.createElement('a');
-      a.href = t.ticket_id;
-      a.target = '_blank';
-      a.style.color = 'var(--primary)';
-      a.style.textDecoration = 'underline';
-      a.textContent = t.ticket_id;
-      tdLink.appendChild(a);
-    } else {
-      tdLink.textContent = t.ticket_id;
-    }
-    const tdType = document.createElement('td');
-    tdType.textContent = t.type;
-    const tdChannel = document.createElement('td');
-    tdChannel.textContent = t.channel;
-    const tdNote = document.createElement('td');
-    tdNote.textContent = t.note || '';
-    const tdAct = document.createElement('td');
-    const btn = document.createElement('button');
-    btn.className = 'btn-delete';
-    btn.textContent = 'Remove';
-    btn.onclick = function() { removeTicket(idx); };
-    tdAct.appendChild(btn);
-    tr.appendChild(tdIndex);
-    tr.appendChild(tdLink);
-    tr.appendChild(tdType);
-    tr.appendChild(tdChannel);
-    tr.appendChild(tdNote);
-    tr.appendChild(tdAct);
+      const a = document.createElement('a'); a.href = t.ticket_id; a.target = '_blank';
+      a.style.color = 'var(--primary)'; a.style.textDecoration = 'underline'; a.textContent = t.ticket_id; tdLink.appendChild(a);
+    } else { tdLink.textContent = t.ticket_id; }
+    const tdType = document.createElement('td'); tdType.textContent = t.type;
+    const tdChannel = document.createElement('td'); tdChannel.textContent = t.channel;
+    const tdNote = document.createElement('td'); tdNote.textContent = t.note || '';
+    const tdEdit = document.createElement('td');
+    const btnEdit = document.createElement('button'); btnEdit.className='btn-edit'; btnEdit.textContent='Edit';
+    btnEdit.onclick = function(){ editTicket(idx); }; tdEdit.appendChild(btnEdit);
+    const tdDel = document.createElement('td');
+    const btnDel = document.createElement('button'); btnDel.className='btn-delete'; btnDel.textContent='Remove';
+    btnDel.onclick = function(){ removeTicket(idx); }; tdDel.appendChild(btnDel);
+
+    tr.appendChild(tdIndex); tr.appendChild(tdLink); tr.appendChild(tdType);
+    tr.appendChild(tdChannel); tr.appendChild(tdNote); tr.appendChild(tdEdit); tr.appendChild(tdDel);
     tbody.appendChild(tr);
   });
 }
 
-/**
- * Update all UI elements based on current state.
- */
+/** Update entire UI */
 function updateUI() {
   if (!currentPerformance) {
-    // Clear values if no performance row is loaded
     document.getElementById('goodValue').textContent = '0';
     document.getElementById('badValue').textContent = '0';
     document.getElementById('karmaValue').textContent = '0';
     document.getElementById('phoneGood').value = '0';
     document.getElementById('chatGood').value = '0';
     document.getElementById('emailGood').value = '0';
+    document.getElementById('genesysGood').value = '0';
+    document.getElementById('genesysBad').value = '0';
+    document.getElementById('phoneCombinedGood').textContent = '0';
+    document.getElementById('phoneCombinedBad').textContent = '0';
     document.getElementById('metricsCard').innerHTML = '';
-    document.getElementById('distributionCard').innerHTML = '';
     document.getElementById('channelAnalyticsContent').innerHTML = '';
     document.getElementById('ticketsTable').querySelector('tbody').innerHTML = '';
-    if (channelChart) {
-      channelChart.destroy();
-      channelChart = null;
-    }
+    document.getElementById('weeklyProgress').innerHTML = '';
+    if (channelChart) { channelChart.destroy(); channelChart = null; }
+    if (distChartGood) { distChartGood.destroy(); distChartGood = null; }
+    if (distChartBad) { distChartBad.destroy(); distChartBad = null; }
     return;
   }
-  document.getElementById('goodValue').textContent = currentPerformance.good || 0;
-  document.getElementById('badValue').textContent = currentPerformance.bad || 0;
-  document.getElementById('karmaValue').textContent = currentPerformance.karma_bad || 0;
+  // Top stats
+  document.getElementById('goodValue').textContent = (currentPerformance.good || 0);
+  document.getElementById('badValue').textContent  = (currentPerformance.bad || 0);
+  document.getElementById('karmaValue').textContent= (currentPerformance.karma_bad || 0);
+
+  // Channel good inputs
   document.getElementById('phoneGood').value = currentPerformance.good_phone || 0;
-  document.getElementById('chatGood').value = currentPerformance.good_chat || 0;
+  document.getElementById('chatGood').value  = currentPerformance.good_chat  || 0;
   document.getElementById('emailGood').value = currentPerformance.good_email || 0;
+
+  // Genesys inputs + combined phone totals
+  document.getElementById('genesysGood').value = currentPerformance.genesys_good || 0;
+  document.getElementById('genesysBad').value  = currentPerformance.genesys_bad  || 0;
+  const phoneCombinedG = (currentPerformance.good_phone||0) + (currentPerformance.genesys_good||0);
+  const phoneCombinedB = (currentPerformance.bad||0) + (currentPerformance.genesys_bad||0); // DSAT portion shown for phone
+  document.getElementById('phoneCombinedGood').textContent = phoneCombinedG;
+  document.getElementById('phoneCombinedBad').textContent  = phoneCombinedB;
+
   updateTicketsTable();
   updateMetrics();
+  updateWeeklyProgress();
   updateDistribution();
   updateChannelAnalytics();
 }
 
-/**
- * Initialise the page: populate years, set current month, attach events and load initial data.
- */
+/** Init */
 function init() {
   populateYears();
   const currentMonth = new Date().getMonth() + 1;
   document.getElementById('monthSelect').value = currentMonth.toString();
   document.getElementById('loadBtn').addEventListener('click', loadMonth);
+  // Attach cancel button in case editing
+  document.getElementById('cancelEditBtn').style.display = 'none';
   loadMonth();
 }
-
-// Fire the init function when the DOM content is loaded
 document.addEventListener('DOMContentLoaded', init);
