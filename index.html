@@ -169,26 +169,16 @@
     <!-- Daily Change Log -->
     <section class="dailylog-section glass-card">
       <h2>Daily Change Log</h2>
-      <div class="dailylog-filters">
-        <div>
-          <label for="logFrom">From</label>
-          <input type="date" id="logFrom"/>
-        </div>
-        <div>
-          <label for="logTo">To</label>
-          <input type="date" id="logTo"/>
-        </div>
-        <button class="btn-primary" onclick="refreshDailyLog()">Filter</button>
-      </div>
+      <!-- The daily log simply lists all changes for the selected month; no filters needed -->
       <div id="dailyLogList" class="timeline"></div>
     </section>
 
     <!-- Distribution -->
     <section id="distributionCard" class="distribution-section glass-card">
       <h2>Channel Distribution</h2>
+      <!-- Use a compact bar chart to show Good and DSAT counts across channels -->
       <div class="distribution-content">
-        <canvas id="distGoodChart" height="200"></canvas>
-        <canvas id="distBadChart" height="200"></canvas>
+        <canvas id="distChart" height="220"></canvas>
       </div>
     </section>
 

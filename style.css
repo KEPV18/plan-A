@@ -90,9 +90,12 @@ body{ margin:0; font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;
 .distribution-content{ display:flex; gap:2rem; justify-content:center; align-items:center; flex-wrap:wrap; }
 
 /* Limit the width of distribution charts so they don't overflow */
+/* Make distribution charts responsive: each canvas flexes up to 300px but not beyond */
 .distribution-content canvas{
-  max-width: 280px;
+  flex: 1 1 260px;
+  max-width: 300px;
   width: 100%;
+  height: auto;
 }
 
 /* Weekly */
@@ -103,12 +106,12 @@ body{ margin:0; font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;
 .week-card.good{ box-shadow:0 0 0 2px rgba(16,185,129,.35) inset; }
 .week-card.bad{ box-shadow:0 0 0 2px rgba(239,68,68,.35) inset; }
 .week-card.in-progress{ box-shadow:0 0 0 2px rgba(234,179,8,.4) inset; }
+.week-card .range{ font-size:.8rem; color:var(--muted); margin-left:.3rem; }
 .hint{ font-size:.8rem; color:var(--muted); margin-top:.5rem; }
 
 /* Daily log */
 .dailylog-section h2{ margin:0 0 .75rem; font-size:1.3rem; font-weight:600; }
-.dailylog-filters{ display:flex; flex-wrap:wrap; gap:.6rem; align-items:end; margin-bottom:.75rem; }
-.dailylog-filters label{ display:block; font-size:.8rem; color:var(--muted); margin-bottom:.2rem; }
+/* Removed filter controls, leaving only the timeline */
 .timeline{ display:grid; gap:.6rem; }
 .timeline .entry{ background:rgba(255,255,255,.75); border:1px solid var(--border); border-radius:8px; padding:.75rem; }
 .timeline .entry .date{ font-weight:600; margin-bottom:.25rem; }

@@ -10,8 +10,7 @@ const supabaseClient = createClient(supabaseUrl, supabaseKey);
 let currentPerformance = null;
 let currentTickets = [];
 let channelChart = null;
-let distChartGood = null;
-let distChartBad = null;
+let distChart = null;
 let editingIndex = -1; // index of ticket being edited; -1 means adding new
 
 /** Helpers */
@@ -53,12 +52,14 @@ function populateYears() {
 /** Load or create performance row for selected year/month */
 async function loadMonth() {
   const year = parseInt(document.getElementById('yearSelect').value);
-  const monthIndex = parseInt(document.getElementById('monthSelect').value) - 1;
+  // Month stored in DB as 1–12. We use 1-based value from the select.
+  const monthVal = parseInt(document.getElementById('monthSelect').value); // 1–12
+  // Fetch performance row for this year and month
   const { data: rows } = await supabaseClient
     .from('performance_data')
     .select('*')
     .eq('year', year)
-    .eq('month', monthIndex);
+    .eq('month', monthVal);
   let row = null;
   if (rows && rows.length > 0) {
     // Choose row with largest total interactions (in case duplicates)
@@ -69,12 +70,12 @@ async function loadMonth() {
     }, rows[0]);
   }
   if (!row) {
-    // Create a new record with zero counts, including Genesys fields
+    // Create a new record with zero counts, including Genesys fields. Store month as 1–12.
     const { data: inserted } = await supabaseClient
       .from('performance_data')
       .insert({
         year,
-        month: monthIndex,
+        month: monthVal,
         good: 0,
         bad: 0,
         karma_bad: 0,
@@ -102,11 +103,38 @@ async function loadTickets() {
     currentTickets = [];
     return;
   }
-  const { data: tickets } = await supabaseClient
+  // Attempt to load tickets by performance_id first
+  let { data: tickets, error: tErr } = await supabaseClient
     .from('tickets')
     .select('*')
     .eq('performance_id', currentPerformance.id)
     .order('created_at', { ascending: true });
+  if (tErr) {
+    console.error('Error loading tickets by performance_id', tErr);
+  }
+  // If no tickets found, fall back to fetching tickets within the month by created_at date range
+  if (!tickets || tickets.length === 0) {
+    try {
+      const year = currentPerformance.year;
+      const monthVal = currentPerformance.month; // 1–12
+      const monthIdx = monthVal - 1;
+      const startDate = new Date(year, monthIdx, 1);
+      const endDate = new Date(year, monthIdx + 1, 1);
+      const fromIso = startDate.toISOString();
+      const toIso = endDate.toISOString();
+      const res = await supabaseClient
+        .from('tickets')
+        .select('*')
+        .gte('created_at', fromIso)
+        .lt('created_at', toIso)
+        .order('created_at', { ascending: true });
+      if (!res.error) {
+        tickets = res.data;
+      }
+    } catch (e) {
+      console.error('Fallback ticket query failed', e);
+    }
+  }
   // Normalize ticket type: unify case and convert legacy values
   currentTickets = (tickets || []).map((t) => {
     const rawType = (t.type || '').trim().toUpperCase();
@@ -390,16 +418,18 @@ async function updateWeeklyProgress() {
   container.innerHTML = '';
   if (!currentPerformance) return;
   const targets = { 1: 80, 2: 84, 3: 86, 4: 88 };
-  // Determine year and month from current performance (month is 0-based)
+  // Determine year and month (month stored as 1–12)
   const year = currentPerformance.year;
-  const monthIdx = currentPerformance.month;
+  const monthVal = currentPerformance.month; // 1–12
+  // Convert to 0-based index for JavaScript Date
+  const monthIdx = monthVal - 1;
   // Determine total days in this month
-  const daysInMonth = new Date(year, monthIdx + 1, 0).getDate();
-  // Define week end dates (1-7, 8-14, 15-21, end of month)
+  const daysInMonth = new Date(year, monthVal, 0).getDate();
+  // Define week end dates: Week1 ends on day 7, Week2 on 14, Week3 on 22, Week4 on end of month
   const weekEnds = [
     new Date(year, monthIdx, 7),
     new Date(year, monthIdx, 14),
-    new Date(year, monthIdx, 21),
+    new Date(year, monthIdx, 22),
     new Date(year, monthIdx, daysInMonth)
   ];
   // Fetch all daily changes for this performance
@@ -433,7 +463,16 @@ async function updateWeeklyProgress() {
   // Generate weekly cards
   for (let i = 0; i < 4; i++) {
     const endDate = weekEnds[i];
-    // Start aggregated values at baseline
+    // Determine start date: for first week it's day 1; otherwise previous end date + 1
+    let startDate;
+    if (i === 0) {
+      startDate = new Date(year, monthIdx, 1);
+    } else {
+      // add one day to previous week end
+      startDate = new Date(weekEnds[i - 1].getTime());
+      startDate.setDate(startDate.getDate() + 1);
+    }
+    // Aggregate baseline values
     const agg = {};
     fields.forEach((f) => {
       agg[f] = baseline[f];
@@ -442,7 +481,6 @@ async function updateWeeklyProgress() {
     (changes || []).forEach((c) => {
       const cd = new Date(c.change_date + 'T00:00:00');
       if (cd <= endDate) {
-        // Only aggregate fields we track
         if (fields.includes(c.field_name)) {
           agg[c.field_name] += c.change_amount;
         }
@@ -456,24 +494,28 @@ async function updateWeeklyProgress() {
     const csat = goodCount + badCount > 0 ? (goodCount / (goodCount + badCount)) * 100 : 0;
     const karma = goodCount + badCount + karmaCount > 0 ? (goodCount / (goodCount + badCount + karmaCount)) * 100 : 0;
     const weekNumber = i + 1;
-    // Determine status: completed or in progress
+    // Determine status: completed or in-progress
     let statusText;
     let cardClass;
-    if (endDate <= today) {
-      // Completed week: evaluate against target
+    if (endDate < today) {
+      const met = csat >= targets[weekNumber];
+      statusText = `${met ? '✓ Met' : '✗ Below'} target (${targets[weekNumber]}%)`;
+      cardClass = met ? 'good' : 'bad';
+    } else if (endDate.getDate() === today.getDate() && endDate.getMonth() === today.getMonth() && endDate.getFullYear() === today.getFullYear()) {
+      // If today equals end date, consider week completed
       const met = csat >= targets[weekNumber];
       statusText = `${met ? '✓ Met' : '✗ Below'} target (${targets[weekNumber]}%)`;
       cardClass = met ? 'good' : 'bad';
     } else {
-      // In-progress week
       statusText = `⚠ In progress (target ${targets[weekNumber]}%)`;
-      // Use neutral styling for in-progress
       cardClass = 'in-progress';
     }
+    // Format range display (e.g., 1–7)
+    const rangeText = `${startDate.getDate()} – ${endDate.getDate()}`;
     const card = document.createElement('div');
     card.className = `week-card ${cardClass}`;
     card.innerHTML = `
-      <div class="row"><strong>Week ${weekNumber}</strong></div>
+      <div class="row"><strong>Week ${weekNumber}</strong> <span class="range">(${rangeText})</span></div>
       <div class="row">CSAT: <strong>${csat.toFixed(1)}%</strong> &nbsp; Karma: <strong>${karma.toFixed(1)}%</strong></div>
       <div class="status">${statusText}</div>
     `;
@@ -500,15 +542,11 @@ async function refreshDailyLog() {
     list.innerHTML = '';
     return;
   }
-  const from = document.getElementById('logFrom').value || null;
-  const to = document.getElementById('logTo').value || null;
-  let query = supabaseClient
+  // Always fetch all changes for the current performance (no date filters)
+  const { data: changes } = await supabaseClient
     .from('daily_changes')
     .select('*')
-    .eq('performance_id', currentPerformance.id);
-  if (from) query = query.gte('change_date', from);
-  if (to) query = query.lte('change_date', to);
-  const { data: changes } = await query
+    .eq('performance_id', currentPerformance.id)
     .order('change_date', { ascending: false })
     .order('created_at', { ascending: false });
   // Group by date
@@ -552,67 +590,61 @@ async function refreshDailyLog() {
 
 /** Update distribution charts (Good / DSAT only) */
 function updateDistribution() {
+  // Destroy existing distribution chart if present
+  if (distChart) {
+    distChart.destroy();
+    distChart = null;
+  }
   if (!currentPerformance) {
-    // Destroy charts if they exist
-    if (distChartGood) {
-      distChartGood.destroy();
-      distChartGood = null;
-    }
-    if (distChartBad) {
-      distChartBad.destroy();
-      distChartBad = null;
-    }
     return;
   }
-  // Good counts per channel with Genesys for phone
-  const pg = (currentPerformance.good_phone || 0) + (currentPerformance.genesys_good || 0);
-  const cg = currentPerformance.good_chat || 0;
-  const eg = currentPerformance.good_email || 0;
-  const goodData = [pg, cg, eg];
-  // DSAT per channel (tickets type DSAT) plus Genesys DSAT for phone
+  // Good counts per channel including Genesys contributions
+  const goodCounts = {
+    Phone: (currentPerformance.good_phone || 0) + (currentPerformance.genesys_good || 0),
+    Chat: currentPerformance.good_chat || 0,
+    Email: currentPerformance.good_email || 0
+  };
+  // DSAT counts per channel (tickets of type DSAT) including Genesys DSAT for Phone
   const dsatCounts = { Phone: 0, Chat: 0, Email: 0 };
   currentTickets.forEach((t) => {
     if (t.type === 'DSAT') dsatCounts[t.channel] = (dsatCounts[t.channel] || 0) + 1;
   });
   dsatCounts.Phone += currentPerformance.genesys_bad || 0;
-  const badData = [dsatCounts.Phone || 0, dsatCounts.Chat || 0, dsatCounts.Email || 0];
-  const goodColors = ['rgba(16,185,129,0.7)', 'rgba(16,185,129,0.5)', 'rgba(16,185,129,0.3)'];
-  const badColors = ['rgba(239,68,68,0.7)', 'rgba(239,68,68,0.5)', 'rgba(239,68,68,0.3)'];
-  const ctxGood = document.getElementById('distGoodChart').getContext('2d');
-  if (distChartGood) distChartGood.destroy();
-  distChartGood = new Chart(ctxGood, {
-    type: 'doughnut',
+  // Prepare data arrays for bar chart
+  const channels = ['Phone', 'Chat', 'Email'];
+  const goodData = channels.map((ch) => goodCounts[ch] || 0);
+  const badData = channels.map((ch) => dsatCounts[ch] || 0);
+  const ctx = document.getElementById('distChart').getContext('2d');
+  distChart = new Chart(ctx, {
+    type: 'bar',
     data: {
-      labels: ['Phone', 'Chat', 'Email'],
+      labels: channels,
       datasets: [
         {
-          label: 'Good Ratings',
+          label: 'Good',
           data: goodData,
-          backgroundColor: goodColors,
-          hoverOffset: 4
-        }
-      ]
-    },
-    options: {
-      plugins: { legend: { position: 'bottom' } }
-    }
-  });
-  const ctxBad = document.getElementById('distBadChart').getContext('2d');
-  if (distChartBad) distChartBad.destroy();
-  distChartBad = new Chart(ctxBad, {
-    type: 'doughnut',
-    data: {
-      labels: ['Phone', 'Chat', 'Email'],
-      datasets: [
+          backgroundColor: 'rgba(16,185,129,0.7)',
+          borderColor: 'rgba(16,185,129,1)',
+          borderWidth: 1
+        },
         {
           label: 'DSAT',
           data: badData,
-          backgroundColor: badColors,
-          hoverOffset: 4
+          backgroundColor: 'rgba(239,68,68,0.7)',
+          borderColor: 'rgba(239,68,68,1)',
+          borderWidth: 1
         }
       ]
     },
     options: {
+      responsive: true,
+      indexAxis: 'y',
+      scales: {
+        x: {
+          beginAtZero: true,
+          title: { display: true, text: 'Count' }
+        }
+      },
       plugins: { legend: { position: 'bottom' } }
     }
   });
