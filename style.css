@@ -87,7 +87,13 @@ body{ margin:0; font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;
 .progress-bar span{ height:100%; display:block; }
 .progress-bar .csat{ background:var(--good); }
 .progress-bar .karma{ background:var(--karma); }
-.distribution-content{ display:flex; gap:2rem; justify-content:center; align-items:center; }
+.distribution-content{ display:flex; gap:2rem; justify-content:center; align-items:center; flex-wrap:wrap; }
+
+/* Limit the width of distribution charts so they don't overflow */
+.distribution-content canvas{
+  max-width: 280px;
+  width: 100%;
+}
 
 /* Weekly */
 .weekly-section h2{ margin:0 0 .75rem; font-size:1.3rem; font-weight:600; }
@@ -96,6 +102,7 @@ body{ margin:0; font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;
 .week-card .status{ font-size:1.1rem; }
 .week-card.good{ box-shadow:0 0 0 2px rgba(16,185,129,.35) inset; }
 .week-card.bad{ box-shadow:0 0 0 2px rgba(239,68,68,.35) inset; }
+.week-card.in-progress{ box-shadow:0 0 0 2px rgba(234,179,8,.4) inset; }
 .hint{ font-size:.8rem; color:var(--muted); margin-top:.5rem; }
 
 /* Daily log */

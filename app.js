@@ -107,7 +107,18 @@ async function loadTickets() {
     .select('*')
     .eq('performance_id', currentPerformance.id)
     .order('created_at', { ascending: true });
-  currentTickets = tickets || [];
+  // Normalize ticket type: unify case and convert legacy values
+  currentTickets = (tickets || []).map((t) => {
+    const rawType = (t.type || '').trim().toUpperCase();
+    let norm;
+    if (rawType === 'CSAT' || rawType === 'DSAT' || rawType === 'BAD') {
+      norm = 'DSAT';
+    } else {
+      // Treat any other negative type as Karma
+      norm = 'Karma';
+    }
+    return { ...t, type: norm };
+  });
 }
 
 /** Update numeric field with delta and log */
@@ -134,6 +145,10 @@ async function updateGoodCounts() {
   const phone = parseInt(document.getElementById('phoneGood').value) || 0;
   const chat = parseInt(document.getElementById('chatGood').value) || 0;
   const email = parseInt(document.getElementById('emailGood').value) || 0;
+  // Capture old values before update for logging
+  const oldPhone = currentPerformance.good_phone || 0;
+  const oldChat = currentPerformance.good_chat || 0;
+  const oldEmail = currentPerformance.good_email || 0;
   const { data } = await supabaseClient
     .from('performance_data')
     .update({ good_phone: phone, good_chat: chat, good_email: email })
@@ -141,7 +156,12 @@ async function updateGoodCounts() {
     .select()
     .single();
   currentPerformance = data;
+  // Log daily changes for good channel counts
+  await logDailyChange('good_phone', oldPhone, phone);
+  await logDailyChange('good_chat', oldChat, chat);
+  await logDailyChange('good_email', oldEmail, email);
   updateUI();
+  await refreshDailyLog();
 }
 
 /** Update Genesys counts and log */
@@ -365,24 +385,97 @@ function updateMetrics() {
 }
 
 /** Weekly progress (simple cumulative snapshot) */
-function updateWeeklyProgress() {
+async function updateWeeklyProgress() {
   const container = document.getElementById('weeklyProgress');
   container.innerHTML = '';
   if (!currentPerformance) return;
   const targets = { 1: 80, 2: 84, 3: 86, 4: 88 };
-  const metrics = computeMetrics();
-  const csat = Number(metrics.csat.toFixed(1));
-  const karma = Number(metrics.karma.toFixed(1));
-  for (let i = 1; i <= 4; i++) {
-    const met = csat >= targets[i];
+  // Determine year and month from current performance (month is 0-based)
+  const year = currentPerformance.year;
+  const monthIdx = currentPerformance.month;
+  // Determine total days in this month
+  const daysInMonth = new Date(year, monthIdx + 1, 0).getDate();
+  // Define week end dates (1-7, 8-14, 15-21, end of month)
+  const weekEnds = [
+    new Date(year, monthIdx, 7),
+    new Date(year, monthIdx, 14),
+    new Date(year, monthIdx, 21),
+    new Date(year, monthIdx, daysInMonth)
+  ];
+  // Fetch all daily changes for this performance
+  const { data: changes } = await supabaseClient
+    .from('daily_changes')
+    .select('*')
+    .eq('performance_id', currentPerformance.id);
+  // Fields that affect performance
+  const fields = [
+    'good_phone',
+    'good_chat',
+    'good_email',
+    'genesys_good',
+    'bad',
+    'karma_bad',
+    'genesys_bad'
+  ];
+  // Compute baseline counts (start-of-month values) by subtracting sum of logged changes from current values
+  const baseline = {};
+  fields.forEach((f) => {
+    let sum = 0;
+    (changes || []).forEach((c) => {
+      if (c.field_name === f) {
+        sum += c.change_amount;
+      }
+    });
+    baseline[f] = (currentPerformance[f] || 0) - sum;
+  });
+  // Current date for determining completed vs in-progress weeks
+  const today = new Date();
+  // Generate weekly cards
+  for (let i = 0; i < 4; i++) {
+    const endDate = weekEnds[i];
+    // Start aggregated values at baseline
+    const agg = {};
+    fields.forEach((f) => {
+      agg[f] = baseline[f];
+    });
+    // Sum changes up to the end date
+    (changes || []).forEach((c) => {
+      const cd = new Date(c.change_date + 'T00:00:00');
+      if (cd <= endDate) {
+        // Only aggregate fields we track
+        if (fields.includes(c.field_name)) {
+          agg[c.field_name] += c.change_amount;
+        }
+      }
+    });
+    // Compute good/bad/karma counts for this week
+    const goodCount =
+      (agg.good_phone || 0) + (agg.good_chat || 0) + (agg.good_email || 0) + (agg.genesys_good || 0);
+    const badCount = (agg.bad || 0) + (agg.genesys_bad || 0);
+    const karmaCount = agg.karma_bad || 0;
+    const csat = goodCount + badCount > 0 ? (goodCount / (goodCount + badCount)) * 100 : 0;
+    const karma = goodCount + badCount + karmaCount > 0 ? (goodCount / (goodCount + badCount + karmaCount)) * 100 : 0;
+    const weekNumber = i + 1;
+    // Determine status: completed or in progress
+    let statusText;
+    let cardClass;
+    if (endDate <= today) {
+      // Completed week: evaluate against target
+      const met = csat >= targets[weekNumber];
+      statusText = `${met ? '✓ Met' : '✗ Below'} target (${targets[weekNumber]}%)`;
+      cardClass = met ? 'good' : 'bad';
+    } else {
+      // In-progress week
+      statusText = `⚠ In progress (target ${targets[weekNumber]}%)`;
+      // Use neutral styling for in-progress
+      cardClass = 'in-progress';
+    }
     const card = document.createElement('div');
-    card.className = `week-card ${met ? 'good' : 'bad'}`;
+    card.className = `week-card ${cardClass}`;
     card.innerHTML = `
-      <div class="row">
-        <strong>Week ${i}</strong>
-      </div>
-      <div class="row">CSAT: <strong>${csat}%</strong> &nbsp; Karma: <strong>${karma}%</strong></div>
-      <div class="status">${met ? '✓ Met' : '✗ Below'} target (${targets[i]}%)</div>
+      <div class="row"><strong>Week ${weekNumber}</strong></div>
+      <div class="row">CSAT: <strong>${csat.toFixed(1)}%</strong> &nbsp; Karma: <strong>${karma.toFixed(1)}%</strong></div>
+      <div class="status">${statusText}</div>
     `;
     container.appendChild(card);
   }
@@ -394,6 +487,9 @@ function prettyFieldLabel(field) {
   if (field === 'karma_bad') return 'Karma Bad';
   if (field === 'genesys_bad') return 'Genesys DSAT';
   if (field === 'genesys_good') return 'Genesys Good';
+  if (field === 'good_phone') return 'Good Phone';
+  if (field === 'good_chat') return 'Good Chat';
+  if (field === 'good_email') return 'Good Email';
   return 'Good';
 }
 
